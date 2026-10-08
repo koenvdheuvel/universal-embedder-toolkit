@@ -17,8 +17,14 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # PRs (possibly from forks) must never run on the self-hosted runner.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","media"]') }}
     steps:
+      - name: C toolchain (self-hosted runner image is minimal)
+        run: |
+          command -v cc >/dev/null && command -v pkg-config >/dev/null && exit 0
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -34,7 +40,7 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: [self-hosted, media]
             slug: amd64
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
@@ -83,7 +89,7 @@ jobs:
   # workflow (`workflow_run`: name `image`) or `needs: publish`.
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, media]
     permissions:
       contents: read
       packages: write

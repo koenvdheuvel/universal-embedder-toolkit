@@ -175,12 +175,17 @@ Tags: `latest` (main), `sha-<short>`, and `X.Y.Z` / `X.Y` for `vX.Y.Z` git tags.
 ### Auto-deploy (self-hosted runner)
 
 The `deploy` workflow runs after every successful `image` run on `main` (or manually via *Run workflow*) on a
-self-hosted runner labelled `self-hosted, media` that sits next to the docker compose project running the server.
-It pulls the new image, restarts only the `uet-server` service, waits for `/healthz`, checks that the running
-container uses the pulled image, runs a Discordbot smoke request that must contain the `application/activity+json`
-link, and prunes dangling images of this repository. Because this repository is public, fork pull requests
-require approval for all external contributors and no workflow triggered by `pull_request` may use the
-self-hosted runner.
+self-hosted runner labelled `self-hosted, media`. The runner is an ephemeral container (one job per container) next
+to the docker compose project running the server; it talks to the host docker daemon and reaches the reverse proxy
+over a shared docker network. It pulls the new image, restarts only the `uet-server` service, waits for `/healthz`
+through the proxy, checks that the running container uses the pulled image, runs a Discordbot smoke request that
+must contain the `application/activity+json` link, verifies the public `/healthz` through Cloudflare, and prunes
+dangling images of this repository.
+
+The same runner executes the `image` workflow's tests (push / manual runs), the `linux/amd64` build and the manifest
+publish, plus the Android APK build and release publish in `release`. Pull request tests, the `linux/arm64` build and
+the macOS build run on GitHub-hosted runners. Because this repository is public, fork pull requests require approval
+for all external contributors and no workflow triggered by `pull_request` may use the self-hosted runner.
 
 ### Android APK and macOS `uet-clip`
 

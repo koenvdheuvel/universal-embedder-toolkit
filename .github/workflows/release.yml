@@ -18,7 +18,7 @@ env:
 
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, media]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,11 +27,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Android SDK packages
-        run: |
-          sdkmanager="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
-          yes | "$sdkmanager" --licenses > /dev/null || true
-          "$sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      # The runner image has no Android SDK: install cmdline-tools + packages (also accepts licenses).
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-35 build-tools;35.0.0
       - uses: gradle/actions/setup-gradle@v4
         with:
           build-root-directory: android
@@ -99,7 +98,7 @@ jobs:
   # Final job: publishes the GitHub release once both assets exist.
   publish:
     needs: [android, macos]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, media]
     permissions:
       contents: write
     steps:

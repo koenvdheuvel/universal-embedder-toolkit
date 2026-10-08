@@ -1,8 +1,10 @@
 name: deploy
 
 # Redeploys the embed fixer on the self-hosted runner after the `image` workflow
-# has published a new multi-arch image from main. The runner lives on the host that
-# runs the docker compose project; GitHub-hosted runners cannot reach it.
+# has published a new multi-arch image from main. The runner is an ephemeral container
+# in the host's compose project: it uses the host docker socket, has the compose project
+# directory mounted read-only at the same path, and shares a docker network with nginx
+# (reachable as `nginx`). GitHub-hosted runners cannot reach the box.
 #
 # Never add pull_request / pull_request_target triggers to workflows that use the
 # self-hosted runner: this repository is public.
@@ -25,6 +27,9 @@ env:
   COMPOSE_DIR: /docker/web
   SERVICE: uet-server
   PUBLIC_HOST: embed.waxdt.com
+  # Inside the runner container 127.0.0.1 is not the host: reach nginx by its service name,
+  # keeping the real hostname for SNI and certificate validation.
+  VIA_NGINX: embed.waxdt.com:443:nginx:443
 
 jobs:
   deploy:
@@ -47,14 +52,14 @@ jobs:
       - name: Wait for /healthz through nginx
         run: |
           for i in $(seq 1 30); do
-            if out=$(curl -fsS --max-time 5 --resolve "$PUBLIC_HOST:443:127.0.0.1" "https://$PUBLIC_HOST/healthz") && [ "$out" = "ok" ]; then
+            if out=$(curl -fsS --max-time 5 --connect-to "$VIA_NGINX" "https://$PUBLIC_HOST/healthz") && [ "$out" = "ok" ]; then
               echo "healthz ok after ${i} attempt(s)"
               exit 0
             fi
             sleep 2
           done
           echo "::error::/healthz did not return ok via nginx"
-          docker compose -f "$COMPOSE_DIR/docker-compose.yml" logs --tail 50 "$SERVICE" || true
+          (cd "$COMPOSE_DIR" && docker compose logs --tail 50 "$SERVICE") || true
           exit 1
 
       - name: Running container uses the pulled image
@@ -73,7 +78,7 @@ jobs:
         run: |
           ua='Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)'
           body=$(curl -fsS --retry 3 --retry-delay 3 --retry-all-errors --max-time 30 \
-            --resolve "$PUBLIC_HOST:443:127.0.0.1" -A "$ua" \
+            --connect-to "$VIA_NGINX" -A "$ua" \
             "https://$PUBLIC_HOST/elonmusk/status/1585341984679469056")
           if ! grep -q 'application/activity+json' <<<"$body"; then
             echo "::error::no application/activity+json link in the Discordbot response"
@@ -81,6 +86,18 @@ jobs:
             exit 1
           fi
           echo "smoke ok: activity+json link present"
+
+      - name: Public /healthz through Cloudflare
+        run: |
+          for i in $(seq 1 10); do
+            if out=$(curl -fsS --max-time 10 "https://$PUBLIC_HOST/healthz") && [ "$out" = "ok" ]; then
+              echo "public healthz ok after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::public /healthz did not return ok"
+          exit 1
 
       - name: Prune dangling embed images
         run: docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/koenvdheuvel/universal-embedder-toolkit"
