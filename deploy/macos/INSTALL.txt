@@ -1,0 +1,19 @@
+uet-clip for macOS (universal: Apple silicon + Intel)
+
+1. Install the binary and clear the download quarantine flag (the binary is ad-hoc signed,
+   not notarized, so Gatekeeper blocks it until you do this):
+
+     sudo cp uet-clip /usr/local/bin/uet-clip
+     sudo xattr -d com.apple.quarantine /usr/local/bin/uet-clip
+
+2. Test it in the foreground (replace with your fix host):
+
+     uet-clip https://fix.example.com
+
+3. Start it at login: edit the fix URL in dev.uet.clip.plist, then
+
+     cp dev.uet.clip.plist ~/Library/LaunchAgents/
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.uet.clip.plist
+
+   Stop it with:  launchctl bootout gui/$(id -u)/dev.uet.clip
+   Log: /tmp/uet-clip.log

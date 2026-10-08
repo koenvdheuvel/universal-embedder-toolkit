@@ -156,3 +156,35 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 You can also change the fix URL in the app: open it from the launcher, edit the URL, tap Save.
+
+## CI and releases
+
+### Server image (GHCR)
+
+Every push to `main` and every `v*` tag runs the `image` workflow: `cargo test --workspace`, then native
+`linux/amd64` + `linux/arm64` builds of the root `Dockerfile`, merged into one multi-arch image.
+
+```sh
+docker pull ghcr.io/koenvdheuvel/universal-embedder-toolkit:latest   # main
+docker pull ghcr.io/koenvdheuvel/universal-embedder-toolkit:0.1.0    # a release tag
+docker pull ghcr.io/koenvdheuvel/universal-embedder-toolkit:sha-abc1234
+```
+
+Tags: `latest` (main), `sha-<short>`, and `X.Y.Z` / `X.Y` for `vX.Y.Z` git tags. The package is public, no login needed.
+
+### Android APK and macOS `uet-clip`
+
+Pushing a `v*` tag runs the `release` workflow and attaches to the
+[GitHub release](https://github.com/koenvdheuvel/universal-embedder-toolkit/releases):
+
+- `uet-embedfix-vX.Y.Z.apk`: signed release APK. The default fix URL is the repository variable `FIX_BASE_URL`
+  (falls back to `https://fix.example.com`); change it in the app after installing.
+- `uet-clip-vX.Y.Z-macos-universal.zip`: universal (arm64 + x86_64) `uet-clip`, the launchd plist and an install note.
+  The binary is ad-hoc signed, not notarized, so clear the quarantine flag after downloading:
+  `xattr -d com.apple.quarantine uet-clip` (then follow `INSTALL.txt` / the [clipboard section](#desktop-clipboard-rewriting-uet-clip)).
+
+Release signing reads `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and
+`ANDROID_KEY_PASSWORD` from the environment (CI sets them from the repo secrets
+`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`). Without them,
+`assembleRelease` produces an unsigned APK and debug builds are unaffected. Keep the keystore: updates must be signed
+with the same key as the installed app.

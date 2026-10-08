@@ -1,0 +1,111 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and (re)publish, e.g. v0.1.0
+        required: true
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android
+      - name: Derive version from tag
+        run: |
+          v="${TAG#v}"
+          IFS=. read -r major minor patch <<< "${v%%[-+]*}"
+          echo "UET_VERSION_NAME=$v" >> "$GITHUB_ENV"
+          echo "UET_VERSION_CODE=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
+      - name: Decode signing keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+      - name: Unit tests and signed release APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon testDebugUnitTest assembleRelease -PfixBaseUrl="${{ vars.FIX_BASE_URL }}"
+      - name: Verify signature and name the asset
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk"
+          mkdir -p dist
+          cp "$apk" "dist/uet-embedfix-${TAG}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked -p uet-clip --target aarch64-apple-darwin
+          cargo build --release --locked -p uet-clip --target x86_64-apple-darwin
+      - name: Universal binary and zip
+        run: |
+          name="uet-clip-${TAG}-macos-universal"
+          mkdir -p "dist/$name"
+          lipo -create -output "dist/$name/uet-clip" \
+            target/aarch64-apple-darwin/release/uet-clip \
+            target/x86_64-apple-darwin/release/uet-clip
+          codesign --force --sign - "dist/$name/uet-clip"
+          lipo -info "dist/$name/uet-clip"
+          cp deploy/macos/dev.uet.clip.plist deploy/macos/INSTALL.txt "dist/$name/"
+          (cd dist && zip -r "$name.zip" "$name")
+          rm -r "dist/$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-uet-clip
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # Final job: publishes the GitHub release once both assets exist.
+  publish:
+    needs: [android, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
