@@ -1,0 +1,25 @@
+# Run from repo root: FIX_DOMAIN=fix.example.com docker compose -f deploy/compose.yaml up -d --build
+services:
+  uet-server:
+    build: ..
+    restart: unless-stopped
+    environment:
+      PUBLIC_URL: https://${FIX_DOMAIN:?set FIX_DOMAIN}
+      # Enables /{lang} translation (DeepL API Free keys end in ":fx").
+      DEEPL_API_KEY: ${DEEPL_API_KEY:-}
+      # MEDIA_MODE: proxy        # stream videos through this server instead of redirecting to the CDN
+      # UPSTREAM_PROXY: socks5h://user:pass@host:port   # only if Instagram/X start blocking the server IP
+      # RUST_LOG: uet_server=debug
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      FIX_DOMAIN: ${FIX_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+volumes:
+  caddy_data:

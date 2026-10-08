@@ -1,0 +1,6 @@
+# The bare host plus FxTwitter-style modifier subdomains (d/dl direct, t text, g gallery,
+# m mosaic, o no activity, i instant view). Each needs a DNS record (or a `*.` wildcard).
+{$FIX_DOMAIN}, d.{$FIX_DOMAIN}, dl.{$FIX_DOMAIN}, t.{$FIX_DOMAIN}, g.{$FIX_DOMAIN}, m.{$FIX_DOMAIN}, o.{$FIX_DOMAIN}, i.{$FIX_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy uet-server:8080
+}

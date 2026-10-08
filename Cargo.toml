@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/uet-core", "crates/uet-server", "crates/uet-clip"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+uet-core = { path = "crates/uet-core" }
+url = "2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

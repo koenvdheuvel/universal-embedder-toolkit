@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Embed Fix</string>
+    <string name="action_fix_embed">Fix embed</string>
+    <string name="tile_label">Fix link</string>
+
+    <string name="fix_base_label">Fix server URL</string>
+    <string name="fix_base_hint">https://fix.example.com</string>
+    <string name="save">Save</string>
+    <string name="help_title">How to use</string>
+    <string name="help_body">1. Share sheet: in Instagram or X, tap Share and pick \"Fix embed\". The fixed link is copied to the clipboard.\n\n2. Text selection menu: select text containing an Instagram or X link, open the selection menu\'s overflow (\"More\") and pick \"Fix embed\". In editable fields the link is replaced in place; otherwise the fixed link is copied.\n\n3. Quick Settings tile: copy an Instagram or X link, then tap the \"Fix link\" tile (add it via the Quick Settings edit button). The clipboard is replaced with the fixed link.</string>
+
+    <string name="toast_fixed">Fixed link copied</string>
+    <string name="toast_no_link">No Instagram or X link found</string>
+    <string name="toast_no_link_clipboard">No Instagram or X link in clipboard</string>
+    <string name="toast_saved">Saved</string>
+    <string name="toast_invalid_url">Enter a valid http(s) URL</string>
+</resources>
