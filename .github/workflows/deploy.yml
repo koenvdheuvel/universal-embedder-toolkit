@@ -1,0 +1,86 @@
+name: deploy
+
+# Redeploys the embed fixer on the self-hosted runner after the `image` workflow
+# has published a new multi-arch image from main. The runner lives on the host that
+# runs the docker compose project; GitHub-hosted runners cannot reach it.
+#
+# Never add pull_request / pull_request_target triggers to workflows that use the
+# self-hosted runner: this repository is public.
+on:
+  workflow_run:
+    workflows: [image]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/koenvdheuvel/universal-embedder-toolkit:latest
+  COMPOSE_DIR: /docker/web
+  SERVICE: uet-server
+  PUBLIC_HOST: embed.waxdt.com
+
+jobs:
+  deploy:
+    # Only deploy images built from a push to main in this repository (not fork PRs
+    # whose head branch happens to be called `main`).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: [self-hosted, media]
+    timeout-minutes: 15
+    steps:
+      - name: Pull and restart only the embed service
+        working-directory: ${{ env.COMPOSE_DIR }}
+        run: |
+          docker compose pull "$SERVICE"
+          docker compose up -d "$SERVICE"
+
+      - name: Wait for /healthz through nginx
+        run: |
+          for i in $(seq 1 30); do
+            if out=$(curl -fsS --max-time 5 --resolve "$PUBLIC_HOST:443:127.0.0.1" "https://$PUBLIC_HOST/healthz") && [ "$out" = "ok" ]; then
+              echo "healthz ok after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::/healthz did not return ok via nginx"
+          docker compose -f "$COMPOSE_DIR/docker-compose.yml" logs --tail 50 "$SERVICE" || true
+          exit 1
+
+      - name: Running container uses the pulled image
+        working-directory: ${{ env.COMPOSE_DIR }}
+        run: |
+          cid=$(docker compose ps -q "$SERVICE")
+          [ -n "$cid" ] || { echo "::error::no container for $SERVICE"; exit 1; }
+          running=$(docker inspect --format '{{.Image}}' "$cid")
+          pulled=$(docker image inspect --format '{{.Id}}' "$IMAGE")
+          echo "running: $running"
+          echo "pulled:  $pulled"
+          docker image inspect --format 'repo digests: {{join .RepoDigests " "}}' "$IMAGE"
+          [ "$running" = "$pulled" ] || { echo "::error::container is not running the pulled $IMAGE"; exit 1; }
+
+      - name: Smoke test (Discordbot preview)
+        run: |
+          ua='Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)'
+          body=$(curl -fsS --retry 3 --retry-delay 3 --retry-all-errors --max-time 30 \
+            --resolve "$PUBLIC_HOST:443:127.0.0.1" -A "$ua" \
+            "https://$PUBLIC_HOST/elonmusk/status/1585341984679469056")
+          if ! grep -q 'application/activity+json' <<<"$body"; then
+            echo "::error::no application/activity+json link in the Discordbot response"
+            echo "$body" | head -c 2000
+            exit 1
+          fi
+          echo "smoke ok: activity+json link present"
+
+      - name: Prune dangling embed images
+        run: docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/koenvdheuvel/universal-embedder-toolkit"
