@@ -1,4 +1,5 @@
 mod activity;
+mod components;
 mod config;
 mod embed;
 mod instagram;
@@ -168,6 +169,7 @@ async fn main() {
         .route("/mosaic/{provider}/{file}", get(mosaic))
         .route("/media/{provider}/{id}/{n}/video.mp4", get(media_video))
         .route("/media/{provider}/{id}/{n}/image.jpg", get(media_image))
+        .route("/media/{provider}/{id}/avatar.jpg", get(media_avatar))
         .fallback(get(post_page))
         .with_state(state.clone());
 
@@ -298,6 +300,7 @@ async fn post_page(State(s): State<Shared>, uri: Uri, headers: HeaderMap) -> Res
         lang,
         base: &s.cfg.public_url,
         origin: &origin,
+        discord_embed: s.cfg.discord_embed,
     };
     // Discord's activity embed translates on its own request (snowcode `l`).
     if let (Some(translator), Some(target)) = (&s.translator, lang)
@@ -459,6 +462,29 @@ async fn media_image(
     headers: HeaderMap,
 ) -> Response {
     serve_media(&s, &provider, &id, n, &headers, |m| Some(&m.image)).await
+}
+
+/// Author picture. Component embeds link this short URL because Instagram's signed avatar
+/// URLs are about 700 bytes, and the whole embed may be at most 3,000.
+async fn media_avatar(
+    State(s): State<Shared>,
+    Path((provider, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(provider) = Provider::from_slug(&provider).filter(|p| p.is_valid_id(&id)) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let post = match s.post(provider, &id).await {
+        Ok(post) => post,
+        Err(e) => {
+            warn!(provider = provider.slug(), id, error = %e, "avatar lookup failed");
+            return error_status(&e).into_response();
+        }
+    };
+    match &post.avatar {
+        Some(url) => deliver(&s, url, &headers).await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Resolves a fresh CDN URL for media item `n` (1-based); redirects or streams it.

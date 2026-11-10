@@ -11,6 +11,8 @@ use uet_core::Provider;
 
 use crate::{
     activity::{self, Snowcode},
+    components,
+    config::DiscordEmbed,
     post::{Media, Post},
     translate::{Translated, same_language},
 };
@@ -116,7 +118,7 @@ pub struct Flags {
     pub gallery: bool,
     /// `m.`: one mosaic image even where several images are supported.
     pub force_mosaic: bool,
-    /// `o.`: no Discord activity embed.
+    /// `o.`: plain OpenGraph tags for Discord, no activity or component embed.
     pub no_activity: bool,
     /// `i.`: Telegram Instant View for every post.
     pub instant_view: bool,
@@ -207,6 +209,8 @@ pub struct Page<'a> {
     pub base: &'a str,
     /// Origin the request came in on, so the activity link keeps its modifier subdomain.
     pub origin: &'a str,
+    /// Which rich embed Discord gets (`DISCORD_EMBED`).
+    pub discord_embed: DiscordEmbed,
 }
 
 impl Page<'_> {
@@ -215,10 +219,23 @@ impl Page<'_> {
         self.flags.gallery && !self.post.media.is_empty()
     }
 
-    /// Discord gets FxTwitter's Mastodon "activity" embed (`/api/v1/statuses/...`) and the
-    /// page skips its own media tags.
+    /// With `DISCORD_EMBED=activity`, Discord gets FxTwitter's Mastodon "activity" embed
+    /// (`/api/v1/statuses/...`) and the page skips its own media tags.
     pub fn uses_activity(&self) -> bool {
-        self.agent.discord && !self.flags.direct && !self.gallery() && !self.flags.no_activity
+        self.discord_embed == DiscordEmbed::Activity
+            && self.agent.discord
+            && !self.flags.direct
+            && !self.gallery()
+            && !self.flags.no_activity
+    }
+
+    /// With `DISCORD_EMBED=components`, Discord gets a component embed. The OpenGraph tags
+    /// stay in the page, because Discord uses them when the component embed fails.
+    pub fn uses_components(&self) -> bool {
+        self.discord_embed == DiscordEmbed::Components
+            && self.agent.discord
+            && !self.flags.direct
+            && !self.flags.no_activity
     }
 
     fn uses_instant_view(&self) -> bool {
@@ -408,6 +425,11 @@ pub fn render_html(page: &Page) -> String {
             escape(&oembed_href(page, &lines, social.as_deref())),
             escape(post.display_name.as_deref().unwrap_or(&post.handle)),
         );
+    }
+    if page.uses_components()
+        && let Some(script) = components::script_tag(page)
+    {
+        h.0.push_str(&script);
     }
     if use_activity && let Some(code) = page.snowcode() {
         let _ = writeln!(
@@ -760,7 +782,7 @@ pub fn linkify(text: &str, provider: Provider) -> String {
     out
 }
 
-fn url_len(s: &str) -> Option<usize> {
+pub fn url_len(s: &str) -> Option<usize> {
     let scheme = ["https://", "http://"].into_iter().find(|p| s.starts_with(p))?;
     let end = s
         .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
@@ -875,6 +897,7 @@ mod tests {
             lang: None,
             base: "https://fix.test",
             origin: "https://fix.test",
+            discord_embed: DiscordEmbed::Activity,
         })
     }
 
@@ -932,6 +955,34 @@ mod tests {
         assert!(html.contains("https://fix.test/mosaic/x/20.jpg"));
         let html = render(&post, SLACK, "", None);
         assert!(html.contains("https://fix.test/mosaic/x/20.jpg"));
+    }
+
+    #[test]
+    fn discord_gets_component_embed_with_og_fallback() {
+        let post = tweet(vec![photo(1), photo(2)]);
+        let page = |label| Page {
+            post: &post,
+            flags: Flags::new(label, false),
+            agent: Agent::new(DISCORD),
+            index: None,
+            translation: None,
+            lang: None,
+            base: "https://fix.test",
+            origin: "https://fix.test",
+            discord_embed: DiscordEmbed::Components,
+        };
+        let html = render_html(&page(""));
+        assert_eq!(count(&html, r#"<script id="discord:component-embed" type="application/json">"#), 1);
+        assert_eq!(count(&html, "application/activity+json"), 0);
+        // OpenGraph tags stay for when Discord can't show the component embed.
+        assert_eq!(count(&html, r#"property="og:image""#), 2);
+        assert!(html.contains("og:description"));
+        // `o.` gives the plain preview.
+        let html = render_html(&page("o"));
+        assert!(!html.contains("discord:component-embed"));
+        // Other unfurlers never get the payload.
+        let html = render_html(&Page { agent: Agent::new(SLACK), ..page("") });
+        assert!(!html.contains("discord:component-embed"));
     }
 
     #[test]

@@ -26,8 +26,10 @@ https://x.com/elonmusk/status/1585341984679469056    →   https://fix.example.c
    `TelegramBot`, `WhatsApp`, `Slackbot`, …)? → fetch the post and return FxTwitter-style embed HTML.
    Anyone else → `303` to the original post, so clicking the link in Discord opens Instagram/X.
 3. Data sources, all unauthenticated:
-   - Instagram: web GraphQL endpoint (one ~20 KB JSON request; any self-generated CSRF token works),
-     falling back to the public embed page (`/p/{code}/embed/captioned/`, `contextJSON`).
+   - Instagram: the logged-out web GraphQL query `PolarisPostRootQuery` (one ~20 KB JSON request with a
+     random `lsd` token), falling back to the public embed page (`/p/{code}/embed/captioned/`,
+     `contextJSON`). Since November 2026 that page carries no post data for most posts, so in practice
+     GraphQL is the only source.
    - X: `cdn.syndication.twimg.com/tweet-result` (the endpoint behind embedded tweets). Videos use the
      highest-bitrate MP4 whose estimated size is ≤ 100 MB (Discord stops inlining very large linked videos).
 4. `og:video` points at `/media/{ig|x}/{id}/{n}/video.mp4` on this server, not at the CDN directly.
@@ -50,13 +52,21 @@ on the fix host:
 | `t.…` | Text only: no images or video. |
 | `g.…` | Gallery: media and author only, no text or engagement. |
 | `m.…` | Always one mosaic image, even on Discord. |
-| `o.…` | Old-style embed: no Discord activity embed. |
+| `o.…` | Old-style embed: plain OpenGraph preview on Discord, no component or activity embed. |
 | `i.…` | Telegram Instant View for every post. |
 | `.../status/{id}/ja`, `/p/{code}/de` | Translate the post (and its quote) with DeepL; needs `DEEPL_API_KEY`, ignored otherwise. |
 
 What the page contains depends on the client, as on FxTwitter:
 
-- **Discord** gets an *activity* link (`/users/{user}/statuses/{snowcode}` → `/api/v1/statuses/{snowcode}`,
+- **Discord** gets a [component embed](https://docs.discord.com/developers/link-previews/component-embeds)
+  (added by Discord on 2026-10-05): a `<script id="discord:component-embed">` JSON layout in the page head.
+  It shows the author with their picture, the post text, the quoted post, a gallery of up to 10 photos and
+  videos, the 💬/❤️ counts and an "Open on Instagram/X" button. Discord allows 3,000 bytes, so long text is
+  cut and the avatar goes through the short `/media/{ig|x}/{id}/avatar.jpg` redirect. The OpenGraph tags
+  below stay in the page, and Discord shows those if it can't render the component embed. Videos in the
+  gallery show a play button and don't autoplay. Check a link with Discord's
+  [Embed Debugger](https://discord.com/developers/embeds).
+- **Discord with `DISCORD_EMBED=activity`** gets an *activity* link (`/users/{user}/statuses/{snowcode}` → `/api/v1/statuses/{snowcode}`,
   a Mastodon v1 status). Discord renders that as a rich post: linked mentions/hashtags/URLs, quote block,
   reply line, 💬/❤️ counts, and every photo or video of the post. The snowcode is FxEmbed's encoding of
   the options (`t`, `m`, `n`, `l`) as digits.
@@ -115,8 +125,9 @@ Without Docker: `cargo build --release -p uet-server`, run `target/release/uet-s
 | `DEEPL_API_KEY` | – | Enables `/{lang}` translation. |
 | `BIND` | `0.0.0.0:8080` | Listen address. |
 | `MEDIA_MODE` | `redirect` | `redirect` to CDN or `proxy` (stream through server). |
+| `DISCORD_EMBED` | `components` | What Discord gets: `components` (component embed) or `activity` (the older Mastodon activity embed). |
 | `UPSTREAM_PROXY` | – | `http://` / `socks5h://` proxy for Instagram/X API requests only. |
-| `IG_DOC_ID` | `25018359077785073` | Instagram GraphQL query id. Instagram rotates these; when it goes stale the embed-page fallback still works. |
+| `IG_DOC_ID` | `27128499623469141` | Instagram GraphQL query id of `PolarisPostRootQuery`. Instagram rotates these. When Instagram posts stop embedding, check the logs for `graphql returned no media` and take the current id from an active fixer such as [InstaFix-Revived](https://github.com/Bl0ck154/InstaFix-Revived) or [OGInstagram](https://github.com/seirenkr/OGInstagram). |
 | `CACHE_TTL_SECS` / `CACHE_CAPACITY` | `3600` / `10000` | Post cache bounds. |
 | `RUST_LOG` | `info` | e.g. `uet_server=debug` logs which fetch strategy was used. |
 
@@ -179,7 +190,7 @@ self-hosted runner labelled `self-hosted, media`. The runner is an ephemeral con
 to the docker compose project running the server; it talks to the host docker daemon and reaches the reverse proxy
 over a shared docker network. It pulls the new image, restarts only the `uet-server` service, waits for `/healthz`
 through the proxy, checks that the running container uses the pulled image, runs a Discordbot smoke request that
-must contain the `application/activity+json` link, verifies the public `/healthz` through Cloudflare, and prunes
+must contain the `discord:component-embed` payload, verifies the public `/healthz` through Cloudflare, and prunes
 dangling images of this repository.
 
 The same runner executes the `image` workflow's tests (push / manual runs), the `linux/amd64` build and the manifest

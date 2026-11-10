@@ -1,8 +1,12 @@
 //! Fetches public post data from Instagram without logging in.
 //!
-//! Strategy: the web GraphQL endpoint (one small JSON request), falling back to the
-//! public embed page (`/p/{code}/embed/captioned/`) which carries the same data in
-//! `contextJSON`.
+//! Strategy: the logged-out web GraphQL query `PolarisPostRootQuery` (one small JSON
+//! request), falling back to the public embed page (`/p/{code}/embed/captioned/`), which used
+//! to carry the same data in `contextJSON`. Since November 2026 that page is script-only for
+//! most posts, so the fallback rarely works.
+//!
+//! The query matches what InstaFix-Revived and OGInstagram send since October 2026: doc id
+//! `27128499623469141`, a random `lsd` token, and no CSRF cookie or app id header.
 
 use reqwest::{StatusCode, header};
 use serde::Deserialize;
@@ -11,8 +15,9 @@ use url::Url;
 
 use crate::post::{FetchError, Media, Post, check_status, iso8601};
 
-const IG_APP_ID: &str = "936619743392459";
-const LSD: &str = "AVqbxe3J_YA";
+const GRAPHQL_URL: &str = "https://www.instagram.com/graphql/query/";
+/// The logged-out query is sent with this bare user agent, not a full browser one.
+const GRAPHQL_UA: &str = "Mozilla/5.0";
 
 pub struct Instagram {
     /// Must not follow redirects: on instagram.com a redirect means login wall.
@@ -28,46 +33,55 @@ impl Instagram {
     pub async fn fetch_post(&self, shortcode: &str) -> Result<Post, FetchError> {
         let mut post = match self.fetch_graphql(shortcode).await {
             Ok(post) => post,
+            // Only an HTTP 404 means the post is gone. An empty GraphQL answer also happens
+            // when the query id is stale or the request is refused, so the embed page still runs.
             Err(FetchError::NotFound) => return Err(FetchError::NotFound),
-            Err(e) => {
-                tracing::debug!(shortcode, error = %e, "graphql failed, trying embed page");
-                self.fetch_embed(shortcode).await?
-            }
+            Err(gql) => match self.fetch_embed(shortcode).await {
+                Ok(post) => {
+                    tracing::warn!(shortcode, error = %gql, "graphql failed, embed page worked");
+                    post
+                }
+                Err(embed) => {
+                    tracing::warn!(shortcode, graphql = %gql, embed = %embed, "every instagram source failed");
+                    return Err(embed);
+                }
+            },
         };
         post.id = shortcode.to_owned();
         Ok(post)
     }
 
     async fn fetch_graphql(&self, shortcode: &str) -> Result<Post, FetchError> {
-        // Double-submit CSRF: any token works as long as cookie and header agree.
-        let csrf: String = std::iter::repeat_with(fastrand::alphanumeric)
-            .take(32)
-            .collect();
-        let variables = format!(r#"{{"shortcode":"{shortcode}"}}"#);
+        // Any random token works as `lsd`, as long as the header and the form field agree.
+        let lsd: String = std::iter::repeat_with(fastrand::alphanumeric).take(24).collect();
+        let variables = serde_json::json!({
+            "shortcode": shortcode,
+            "__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": false,
+        })
+        .to_string();
         let resp = self
             .api
-            .post("https://www.instagram.com/graphql/query")
-            .header("X-IG-App-ID", IG_APP_ID)
-            .header("X-FB-LSD", LSD)
-            .header("X-CSRFToken", &csrf)
-            .header(header::COOKIE, format!("csrftoken={csrf}"))
-            .header("X-FB-Friendly-Name", "PolarisPostActionLoadPostQueryQuery")
-            .header(header::ORIGIN, "https://www.instagram.com")
-            .header("Sec-Fetch-Site", "same-origin")
+            .post(GRAPHQL_URL)
+            .header(header::USER_AGENT, GRAPHQL_UA)
+            .header(header::ACCEPT, "*/*")
+            .header("X-FB-Friendly-Name", "PolarisPostRootQuery")
+            .header("X-FB-LSD", &lsd)
             .form(&[
-                ("lsd", LSD),
-                ("variables", &variables),
+                ("variables", variables.as_str()),
                 ("doc_id", &self.doc_id),
+                ("server_timestamps", "true"),
+                ("lsd", &lsd),
             ])
             .send()
             .await?;
         let resp = check_status(resp)?;
         let body: GqlResponse = resp.json().await?;
+        body.check()?;
         let item = body
             .data
             .and_then(|d| d.info)
             .and_then(|i| i.items.into_iter().next())
-            .ok_or(FetchError::NotFound)?;
+            .ok_or_else(|| FetchError::Parse("graphql returned no media (stale IG_DOC_ID, refused, or post gone)".into()))?;
         item.into_post()
     }
 
@@ -123,6 +137,39 @@ impl Instagram {
 #[derive(Deserialize)]
 struct GqlResponse {
     data: Option<GqlData>,
+    /// GraphQL reports rate limits in a 200 response.
+    #[serde(default)]
+    errors: Vec<GqlError>,
+    /// `"fail"` with a `message` when Instagram refuses the request.
+    status: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GqlError {
+    code: Option<i64>,
+    message: Option<String>,
+}
+
+impl GqlResponse {
+    fn check(&self) -> Result<(), FetchError> {
+        if self.status.as_deref() == Some("fail") {
+            let msg = self.message.as_deref().unwrap_or("no message");
+            return Err(FetchError::Parse(format!("instagram refused the query: {msg}")));
+        }
+        match self.errors.first() {
+            Some(e) if e.message.as_deref().is_some_and(|m| m.contains("Please wait")) => {
+                Err(FetchError::Blocked(StatusCode::TOO_MANY_REQUESTS))
+            }
+            // Only an error without data is a failure; partial errors still carry the post.
+            Some(e) if self.data.is_none() => Err(FetchError::Parse(format!(
+                "graphql error {}: {}",
+                e.code.unwrap_or_default(),
+                e.message.as_deref().unwrap_or("no message")
+            ))),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -222,7 +269,7 @@ fn parse_embed(html: &str) -> Result<Post, FetchError> {
     const KEY: &str = "\"contextJSON\":";
     let start = html
         .find(KEY)
-        .ok_or_else(|| FetchError::Parse("embed page without contextJSON".into()))?
+        .ok_or_else(|| FetchError::Parse("embed page without contextJSON (post data not in the HTML)".into()))?
         + KEY.len();
     // contextJSON is a JSON string containing JSON; read exactly one value.
     let mut de = serde_json::Deserializer::from_str(&html[start..]);
@@ -326,5 +373,39 @@ impl GraphMedia {
             media,
             quote: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embed_page_without_data_is_not_a_missing_post() {
+        // Instagram's embed page became a script-only page in November 2026.
+        let html = r#"<!DOCTYPE html><html><head><title>Instagram</title></head><body><script type="application/json">{"__bbox":{}}</script></body></html>"#;
+        assert!(matches!(parse_embed(html), Err(FetchError::Parse(_))));
+    }
+
+    #[test]
+    fn graphql_errors_are_reported() {
+        let parse = |json: &str| serde_json::from_str::<GqlResponse>(json).unwrap().check();
+        assert!(matches!(
+            parse(r#"{"errors":[{"code":1675004,"message":"Please wait a few minutes before you try again."}]}"#),
+            Err(FetchError::Blocked(StatusCode::TOO_MANY_REQUESTS))
+        ));
+        assert!(matches!(parse(r#"{"status":"fail","message":"useragent mismatch"}"#), Err(FetchError::Parse(_))));
+        assert!(matches!(parse(r#"{"errors":[{"code":1,"message":"x"}]}"#), Err(FetchError::Parse(_))));
+        assert!(parse(r#"{"data":{"xdt_api__v1__media__shortcode__web_info":null},"errors":[{"message":"partial"}]}"#).is_ok());
+    }
+
+    #[test]
+    fn parses_embed_context_json() {
+        let context = r#"{"gql_data":{"shortcode_media":{"display_url":"https://cdn.test/a.jpg","dimensions":{"width":1080,"height":1350},"owner":{"username":"ah"},"edge_media_to_caption":{"edges":[{"node":{"text":"hi"}}]}}}}"#;
+        let html = format!(r#"x "contextJSON":{} y"#, serde_json::to_string(context).unwrap());
+        let post = parse_embed(&html).unwrap();
+        assert_eq!(post.handle, "ah");
+        assert_eq!(post.text.as_deref(), Some("hi"));
+        assert_eq!(post.media.len(), 1);
     }
 }

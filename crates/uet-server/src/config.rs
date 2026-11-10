@@ -9,6 +9,15 @@ pub enum MediaMode {
     Proxy,
 }
 
+/// Which rich embed Discord gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscordEmbed {
+    /// Component embed (`discord:component-embed` JSON in the page).
+    Components,
+    /// FxTwitter-style Mastodon activity link.
+    Activity,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
@@ -16,11 +25,12 @@ pub struct Config {
     pub public_url: String,
     /// Host of `public_url`; modifier subdomains (`d.`, `t.`, ...) are matched against it.
     pub public_host: String,
-    /// GraphQL `doc_id` of `PolarisPostActionLoadPostQueryQuery`; Instagram rotates these.
+    /// GraphQL `doc_id` of the logged-out `PolarisPostRootQuery`; Instagram rotates these.
     pub doc_id: String,
     /// Optional HTTP/SOCKS5 proxy for Instagram/X API requests (not media).
     pub upstream_proxy: Option<String>,
     pub media_mode: MediaMode,
+    pub discord_embed: DiscordEmbed,
     /// Enables `/{lang}` translation.
     pub deepl_api_key: Option<String>,
     pub cache_ttl: Duration,
@@ -38,6 +48,13 @@ impl Config {
             Some("proxy") => MediaMode::Proxy,
             Some(other) => return Err(format!("MEDIA_MODE: expected redirect|proxy, got {other}")),
         };
+        let discord_embed = match var("DISCORD_EMBED").as_deref() {
+            None | Some("components") => DiscordEmbed::Components,
+            Some("activity") => DiscordEmbed::Activity,
+            Some(other) => {
+                return Err(format!("DISCORD_EMBED: expected components|activity, got {other}"));
+            }
+        };
         let public_url = var("PUBLIC_URL")
             .unwrap_or_else(|| "http://localhost:8080".into())
             .trim_end_matches('/')
@@ -54,9 +71,10 @@ impl Config {
                 .map_err(|e| format!("BIND: {e}"))?,
             public_url,
             public_host,
-            doc_id: var("IG_DOC_ID").unwrap_or_else(|| "25018359077785073".into()),
+            doc_id: var("IG_DOC_ID").unwrap_or_else(|| "27128499623469141".into()),
             upstream_proxy: var("UPSTREAM_PROXY"),
             media_mode,
+            discord_embed,
             deepl_api_key: var("DEEPL_API_KEY"),
             cache_ttl: Duration::from_secs(parse_u64("CACHE_TTL_SECS", 3600)?),
             cache_capacity: parse_u64("CACHE_CAPACITY", 10_000)?,
